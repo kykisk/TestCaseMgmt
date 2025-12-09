@@ -1,0 +1,566 @@
+/**
+ * Test Cases API Routes
+ */
+
+const express = require('express');
+const router = express.Router();
+const pool = require('../db/pool');
+
+// GET all testcases for a project
+router.get('/project/:projectId', async (req, res) => {
+  try {
+    const { projectId } = req.params;
+
+    // Get test cases with their steps and requirements
+    const tcResult = await pool.query(
+      'SELECT * FROM testcases WHERE project_id = $1 ORDER BY created_at DESC',
+      [projectId]
+    );
+
+    // Get steps and requirements for each testcase
+    const testcases = await Promise.all(
+      tcResult.rows.map(async (tc) => {
+        // Get steps
+        const stepsResult = await pool.query(
+          'SELECT * FROM test_steps WHERE testcase_id = $1 ORDER BY step_number',
+          [tc.id]
+        );
+
+        // Get linked requirements
+        const reqResult = await pool.query(
+          `SELECT r.* FROM requirements r
+           INNER JOIN testcase_requirements tr ON r.id = tr.requirement_id
+           WHERE tr.testcase_id = $1`,
+          [tc.id]
+        );
+
+        return {
+          ...tc,
+          steps: stepsResult.rows,
+          requirements: reqResult.rows,
+          requirement_ids: reqResult.rows.map(r => r.id), // ID 배열 추가
+        };
+      })
+    );
+
+    res.json(testcases);
+  } catch (error) {
+    console.error('Error fetching testcases:', error);
+    res.status(500).json({ error: 'Failed to fetch testcases' });
+  }
+});
+
+// GET single testcase
+router.get('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const tcResult = await pool.query(
+      'SELECT * FROM testcases WHERE id = $1',
+      [id]
+    );
+
+    if (tcResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Testcase not found' });
+    }
+
+    const testcase = tcResult.rows[0];
+
+    // Get steps
+    const stepsResult = await pool.query(
+      'SELECT * FROM test_steps WHERE testcase_id = $1 ORDER BY step_number',
+      [id]
+    );
+
+    // Get linked requirements
+    const reqResult = await pool.query(
+      `SELECT r.* FROM requirements r
+       INNER JOIN testcase_requirements tr ON r.id = tr.requirement_id
+       WHERE tr.testcase_id = $1`,
+      [id]
+    );
+
+    res.json({
+      ...testcase,
+      steps: stepsResult.rows,
+      requirements: reqResult.rows,
+      requirement_ids: reqResult.rows.map(r => r.id), // ID 배열 추가
+    });
+  } catch (error) {
+    console.error('Error fetching testcase:', error);
+    res.status(500).json({ error: 'Failed to fetch testcase' });
+  }
+});
+
+// POST create testcase
+router.post('/', async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const {
+      id,
+      project_id,
+      title,
+      description,
+      priority,
+      category,
+      preconditions,
+      postconditions,
+      tags,
+      attachments,
+      steps,
+      requirement_ids,
+    } = req.body;
+
+    if (!id || !project_id || !title) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    // Insert testcase
+    const tcResult = await client.query(
+      `INSERT INTO testcases
+       (id, project_id, title, description, priority, category, preconditions, postconditions, tags, attachments)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       RETURNING *`,
+      [id, project_id, title, description, priority, category, preconditions, postconditions, tags, attachments]
+    );
+
+    const testcase = tcResult.rows[0];
+
+    // Insert steps
+    if (steps && steps.length > 0) {
+      for (const step of steps) {
+        await client.query(
+          'INSERT INTO test_steps (testcase_id, step_number, action, expected_result) VALUES ($1, $2, $3, $4)',
+          [id, step.stepNumber, step.action, step.expectedResult]
+        );
+      }
+    }
+
+    // Link requirements (only if they exist)
+    if (requirement_ids && requirement_ids.length > 0) {
+      for (const req_id of requirement_ids) {
+        // Check if requirement exists
+        const reqCheck = await client.query(
+          'SELECT id FROM requirements WHERE id = $1',
+          [req_id]
+        );
+
+        if (reqCheck.rows.length > 0) {
+          await client.query(
+            'INSERT INTO testcase_requirements (testcase_id, requirement_id) VALUES ($1, $2)',
+            [id, req_id]
+          );
+        } else {
+          console.warn(`Skipping non-existent requirement: ${req_id}`);
+        }
+      }
+    }
+
+    await client.query('COMMIT');
+
+    // Return complete testcase
+    const stepsResult = await client.query(
+      'SELECT * FROM test_steps WHERE testcase_id = $1 ORDER BY step_number',
+      [id]
+    );
+
+    const reqResult = await client.query(
+      `SELECT r.* FROM requirements r
+       INNER JOIN testcase_requirements tr ON r.id = tr.requirement_id
+       WHERE tr.testcase_id = $1`,
+      [id]
+    );
+
+    res.status(201).json({
+      ...testcase,
+      steps: stepsResult.rows,
+      requirements: reqResult.rows,
+      requirement_ids: reqResult.rows.map(r => r.id), // ID 배열 추가
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error creating testcase:', error);
+    res.status(500).json({ error: 'Failed to create testcase' });
+  } finally {
+    client.release();
+  }
+});
+
+// PUT update testcase
+router.put('/:id', async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const { id } = req.params;
+    const {
+      title,
+      description,
+      priority,
+      category,
+      preconditions,
+      postconditions,
+      status,
+      tags,
+      attachments,
+      steps,
+      requirement_ids,
+    } = req.body;
+
+    // Update testcase
+    const tcResult = await client.query(
+      `UPDATE testcases
+       SET title = $1, description = $2, priority = $3, category = $4,
+           preconditions = $5, postconditions = $6, status = $7, tags = $8, attachments = $9
+       WHERE id = $10
+       RETURNING *`,
+      [title, description, priority, category, preconditions, postconditions, status, tags, attachments, id]
+    );
+
+    if (tcResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Testcase not found' });
+    }
+
+    // Delete and re-insert steps
+    await client.query('DELETE FROM test_steps WHERE testcase_id = $1', [id]);
+    if (steps && steps.length > 0) {
+      for (const step of steps) {
+        // stepNumber 또는 step_number 지원
+        const stepNum = step.stepNumber || step.step_number;
+        const expectedResult = step.expectedResult || step.expected_result;
+
+        if (!stepNum) {
+          console.warn('Step missing step_number:', step);
+          continue; // step_number가 없으면 스킵
+        }
+
+        await client.query(
+          'INSERT INTO test_steps (testcase_id, step_number, action, expected_result) VALUES ($1, $2, $3, $4)',
+          [id, stepNum, step.action, expectedResult]
+        );
+      }
+    }
+
+    // Update requirement links (only if they exist)
+    await client.query('DELETE FROM testcase_requirements WHERE testcase_id = $1', [id]);
+    if (requirement_ids && requirement_ids.length > 0) {
+      for (const req_id of requirement_ids) {
+        // Check if requirement exists
+        const reqCheck = await client.query(
+          'SELECT id FROM requirements WHERE id = $1',
+          [req_id]
+        );
+
+        if (reqCheck.rows.length > 0) {
+          await client.query(
+            'INSERT INTO testcase_requirements (testcase_id, requirement_id) VALUES ($1, $2)',
+            [id, req_id]
+          );
+        } else {
+          console.warn(`Skipping non-existent requirement: ${req_id}`);
+        }
+      }
+    }
+
+    await client.query('COMMIT');
+
+    // Return updated testcase
+    const stepsResult = await client.query(
+      'SELECT * FROM test_steps WHERE testcase_id = $1 ORDER BY step_number',
+      [id]
+    );
+
+    const reqResult = await client.query(
+      `SELECT r.* FROM requirements r
+       INNER JOIN testcase_requirements tr ON r.id = tr.requirement_id
+       WHERE tr.testcase_id = $1`,
+      [id]
+    );
+
+    res.json({
+      ...tcResult.rows[0],
+      steps: stepsResult.rows,
+      requirements: reqResult.rows,
+      requirement_ids: reqResult.rows.map(r => r.id), // ID 배열 추가
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error updating testcase:', error);
+    res.status(500).json({ error: 'Failed to update testcase' });
+  } finally {
+    client.release();
+  }
+});
+
+// DELETE testcase
+router.delete('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(
+      'DELETE FROM testcases WHERE id = $1 RETURNING *',
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Testcase not found' });
+    }
+
+    res.json({ message: 'Testcase deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting testcase:', error);
+    res.status(500).json({ error: 'Failed to delete testcase' });
+  }
+});
+
+// GET testcase execution history
+router.get('/:id/execution-history', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // 이 TC가 포함된 모든 수행 결과 가져오기
+    const result = await pool.query(
+      `SELECT
+        tcr.*,
+        r.run_number,
+        r.status as run_status,
+        r.started_at,
+        r.completed_at,
+        i.name as item_name,
+        i.requirement_ids,
+        s.name as suite_name,
+        s.purpose as suite_purpose
+       FROM test_case_results tcr
+       INNER JOIN test_execution_runs r ON tcr.run_id = r.id
+       INNER JOIN test_execution_items i ON r.item_id = i.id
+       INNER JOIN test_execution_suites s ON i.suite_id = s.id
+       WHERE tcr.testcase_id = $1
+       ORDER BY r.started_at DESC`,
+      [id]
+    );
+
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching testcase execution history:', error);
+    res.status(500).json({ error: 'Failed to fetch execution history' });
+  }
+});
+
+// POST generate testcases from AI
+router.post('/generate-from-ai', async (req, res) => {
+  try {
+    const { title, description, projectId, category = 'Functional' } = req.body;
+
+    if (!title || !description || !projectId) {
+      return res.status(400).json({ error: 'Missing required fields: title, description, projectId' });
+    }
+
+    // 카테고리별 테스트 가이드
+    const categoryGuides = {
+      'Functional': '기능의 정상 동작, 예외 처리, 입력값 검증, 비즈니스 로직 등을 검증하는 테스트',
+      'Integration': '여러 모듈/컴포넌트 간의 연동, 데이터 흐름, API 통합 등을 검증하는 테스트',
+      'UI': 'UI 요소 표시, 레이아웃, 사용자 인터랙션, 반응형 디자인 등을 검증하는 테스트',
+      'API': 'REST API 엔드포인트, 요청/응답 형식, 상태 코드, 에러 핸들링 등을 검증하는 테스트',
+      'Performance': '응답 시간, 처리 속도, 부하 처리, 메모리 사용량 등 성능을 검증하는 테스트',
+      'Security': '인증/인가, 권한 검증, 데이터 보안, SQL 인젝션 방어 등 보안을 검증하는 테스트',
+    };
+
+    // Create AI prompt
+    const prompt = `당신은 테스트케이스 작성 전문가입니다. 다음 기능에 대한 "${category}" 테스트케이스를 JSON 형식으로 생성해주세요.
+
+기능 제목: ${title}
+테스트 카테고리: ${category}
+카테고리 설명: ${categoryGuides[category] || '기능 테스트'}
+
+기능 설명/명세:
+${description}
+
+위 기능 설명은 자유 형식이거나 구조화된 템플릿 형식일 수 있습니다.
+- 구조화된 템플릿인 경우: ## 섹션으로 구분된 입력/출력/규칙/예외상황 등을 분석하세요
+- 자유 형식인 경우: 전체 내용을 분석하여 테스트 시나리오를 도출하세요
+
+다음 JSON 형식으로 여러 개의 테스트케이스를 생성해주세요:
+{
+  "testcases": [
+    {
+      "title": "테스트케이스 제목",
+      "description": "테스트케이스 설명",
+      "priority": "High|Medium|Low",
+      "category": "${category}",
+      "preconditions": "사전 조건",
+      "steps": [
+        {
+          "stepNumber": 1,
+          "action": "수행할 액션",
+          "expectedResult": "예상 결과"
+        }
+      ],
+      "postconditions": "사후 조건",
+      "tags": ["tag1", "tag2"]
+    }
+  ]
+}
+
+중요: 모든 테스트케이스의 category는 반드시 "${category}"로 설정하세요.
+
+"${category}" 카테고리에 맞는 다양한 시나리오를 포함해주세요:
+${category === 'Functional' ? `
+- 정상 동작 케이스 (Happy Path)
+- 예외 처리 케이스 (Error Cases)
+- 경계값 테스트 (Boundary Tests)
+- 부정적인 케이스 (Negative Cases)
+- 비즈니스 규칙 검증` : ''}
+${category === 'Integration' ? `
+- 모듈 간 데이터 전달 테스트
+- API 연동 테스트
+- 외부 시스템 통합 테스트
+- 에러 전파 테스트` : ''}
+${category === 'UI' ? `
+- UI 요소 표시 테스트
+- 사용자 인터랙션 테스트
+- 반응형 레이아웃 테스트
+- 접근성 테스트` : ''}
+${category === 'API' ? `
+- 엔드포인트 정상 호출 테스트
+- 요청/응답 형식 검증
+- HTTP 상태 코드 검증
+- 에러 응답 테스트` : ''}
+${category === 'Performance' ? `
+- 응답 시간 측정 테스트
+- 대용량 데이터 처리 테스트
+- 동시 접속 부하 테스트
+- 메모리 사용량 테스트` : ''}
+${category === 'Security' ? `
+- 인증/인가 테스트
+- 권한 검증 테스트
+- 데이터 암호화 테스트
+- 보안 취약점 테스트` : ''}
+
+5-7개의 "${category}" 테스트케이스를 생성해주세요. (너무 많으면 응답이 잘릴 수 있습니다)
+중요:
+- JSON만 반환하고 다른 설명은 추가하지 마세요
+- 각 테스트케이스는 간결하게 작성하세요
+- 응답은 반드시 완전한 JSON 형식이어야 합니다`;
+
+    let aiResponse;
+
+    // Check if using Bedrock API Key format (base64 encoded AWS credentials)
+    let awsAccessKeyId = process.env.AWS_ACCESS_KEY_ID;
+    let awsSecretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
+
+    if (process.env.BEDROCK_API_KEY && process.env.BEDROCK_API_KEY !== 'your-bedrock-api-key') {
+      // Decode Bedrock API Key (format: base64(access_key:secret_key))
+      try {
+        const decoded = Buffer.from(process.env.BEDROCK_API_KEY, 'base64').toString('utf-8');
+        console.log('[Bedrock] Decoded key length:', decoded.length);
+        console.log('[Bedrock] Decoded format preview:', decoded.substring(0, 50) + '...');
+
+        const parts = decoded.split(':');
+        console.log('[Bedrock] Number of parts after split:', parts.length);
+
+        if (parts.length >= 2) {
+          awsAccessKeyId = parts[0];
+          awsSecretAccessKey = parts.slice(1).join(':'); // In case secret key contains ':'
+          console.log('[Bedrock] Access Key ID length:', awsAccessKeyId?.length);
+          console.log('[Bedrock] Access Key ID preview:', awsAccessKeyId?.substring(0, 10) + '...');
+          console.log('[Bedrock] Secret Key length:', awsSecretAccessKey?.length);
+        } else {
+          console.error('[Bedrock] Invalid key format - expected "access_key:secret_key"');
+        }
+      } catch (error) {
+        console.error('Failed to decode BEDROCK_API_KEY:', error);
+      }
+    }
+
+    if (awsAccessKeyId && awsSecretAccessKey &&
+        awsAccessKeyId !== 'your-aws-access-key-id' &&
+        awsSecretAccessKey !== 'your-aws-secret-access-key') {
+      // Use AWS Bedrock SDK
+      const { BedrockRuntimeClient, InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
+
+      const client = new BedrockRuntimeClient({
+        region: process.env.AWS_REGION || 'us-east-1',
+        credentials: {
+          accessKeyId: awsAccessKeyId,
+          secretAccessKey: awsSecretAccessKey,
+        },
+      });
+
+      const payload = {
+        anthropic_version: 'bedrock-2023-05-31',
+        max_tokens: 16384, // Increased for longer responses
+        messages: [
+          {
+            role: 'user',
+            content: prompt,
+          },
+        ],
+      };
+
+      // Try different model IDs - AWS Bedrock supports different formats
+      // Using Claude Sonnet 4.5
+      const modelId = process.env.AWS_BEDROCK_MODEL_ID ||
+                      'us.anthropic.claude-sonnet-4-5-20250929-v1:0';
+
+      console.log('[Bedrock] Using model ID:', modelId);
+      console.log('[Bedrock] Region:', process.env.AWS_REGION || 'us-east-1');
+
+      const command = new InvokeModelCommand({
+        modelId: modelId,
+        contentType: 'application/json',
+        accept: 'application/json',
+        body: JSON.stringify(payload),
+      });
+
+      const response = await client.send(command);
+      const responseBody = JSON.parse(new TextDecoder().decode(response.body));
+      aiResponse = responseBody.content[0].text;
+    } else {
+      return res.status(500).json({
+        error: 'AWS Bedrock credentials not configured',
+        details: 'Please set BEDROCK_API_KEY or (AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY) in .env file'
+      });
+    }
+
+    console.log('AI Response length:', aiResponse.length);
+    console.log('AI Response preview:', aiResponse.substring(0, 200));
+
+    // Extract JSON from response (handle markdown code blocks)
+    let jsonStr = aiResponse.trim();
+    if (jsonStr.startsWith('```json')) {
+      jsonStr = jsonStr.replace(/```json\n?/g, '').replace(/```\n?$/g, '');
+    } else if (jsonStr.startsWith('```')) {
+      jsonStr = jsonStr.replace(/```\n?/g, '');
+    }
+
+    // Check if JSON is complete (ends with })
+    if (!jsonStr.trim().endsWith('}')) {
+      console.error('[AI] Incomplete JSON response - response was truncated');
+      return res.status(500).json({
+        error: 'AI response was incomplete',
+        details: 'The AI response was truncated. Try with a shorter description or simpler requirements.'
+      });
+    }
+
+    const generatedData = JSON.parse(jsonStr);
+
+    res.json({
+      success: true,
+      testcases: generatedData.testcases,
+      message: `${generatedData.testcases.length}개의 테스트케이스가 생성되었습니다.`,
+    });
+  } catch (error) {
+    console.error('Error generating testcases from AI:', error);
+    res.status(500).json({
+      error: 'Failed to generate testcases from AI',
+      details: error.message
+    });
+  }
+});
+
+module.exports = router;

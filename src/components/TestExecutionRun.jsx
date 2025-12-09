@@ -1,0 +1,580 @@
+import { useState, useEffect } from 'react';
+import { ArrowLeft, ChevronLeft, ChevronRight, CheckCircle, X } from 'lucide-react';
+import Button from './common/Button';
+
+/**
+ * 테스트 실행 화면 (TC 하나씩)
+ */
+export default function TestExecutionRun({
+  item,
+  testCases,
+  rerunType = 'all',
+  existingRunId = null,
+  onBack,
+  onComplete,
+}) {
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [runId, setRunId] = useState(existingRunId);
+  const [results, setResults] = useState({}); // { testcaseId: { result, notes, stepResults: [] } }
+  const [isCreatingRun, setIsCreatingRun] = useState(false);
+  const [currentStepResults, setCurrentStepResults] = useState([]); // 현재 TC의 스텝별 결과
+  const [runInitialized, setRunInitialized] = useState(false); // 중복 실행 방지
+
+  useEffect(() => {
+    if (!runInitialized) {
+      setRunInitialized(true);
+      if (existingRunId) {
+        // 기존 Run 불러오기
+        loadExistingRun(existingRunId);
+      } else {
+        // 새 Run 생성
+        createRun();
+      }
+    }
+  }, []);
+
+  // 기존 Run 불러오기 (이어하기)
+  const loadExistingRun = async (runId) => {
+    setIsCreatingRun(true);
+    try {
+      const response = await fetch(`/api/test-execution-runs/${runId}`);
+
+      if (!response.ok) {
+        throw new Error('Run 불러오기 실패');
+      }
+
+      const runData = await response.json();
+
+      // 기존 결과 복원
+      const loadedResults = {};
+      (runData.results || []).forEach((result) => {
+        loadedResults[result.testcase_id] = {
+          result: result.result,
+          notes: result.notes || '',
+          stepResults: result.step_results || [],
+        };
+      });
+      setResults(loadedResults);
+
+      // 마지막으로 완료한 TC의 다음부터 시작
+      const completedTCs = Object.keys(loadedResults).length;
+      setCurrentIndex(completedTCs); // 다음 TC부터 시작
+
+      setRunId(runId);
+    } catch (error) {
+      console.error('Run 불러오기 실패:', error);
+      alert('이어하기에 실패했습니다.');
+      onBack();
+    } finally {
+      setIsCreatingRun(false);
+    }
+  };
+
+  const createRun = async () => {
+    setIsCreatingRun(true);
+    try {
+      const response = await fetch('/api/test-execution-runs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          item_id: item.id,
+          rerun_type: rerunType, // 전체 또는 실패한 것만
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Run 생성 실패');
+      }
+
+      const newRun = await response.json();
+      setRunId(newRun.id);
+    } catch (error) {
+      console.error('Run 생성 실패:', error);
+      alert('테스트 실행 시작에 실패했습니다.');
+      onBack();
+    } finally {
+      setIsCreatingRun(false);
+    }
+  };
+
+  const currentTC = testCases[currentIndex];
+  const currentResult = results[currentTC?.id] || { result: null, notes: '', stepResults: [] };
+  const totalCount = testCases.length;
+  const completedCount = Object.keys(results).filter(id => results[id].result).length;
+
+  // TC가 변경될 때 스텝 결과 초기화
+  useEffect(() => {
+    if (currentTC) {
+      const tcResult = results[currentTC.id];
+      if (tcResult && tcResult.stepResults) {
+        setCurrentStepResults(tcResult.stepResults);
+      } else {
+        // 스텝 결과 초기화
+        const initialStepResults = (currentTC.steps || []).map((step, idx) => ({
+          stepNumber: step.stepNumber || step.step_number || idx + 1,
+          result: null,
+          notes: '',
+        }));
+        setCurrentStepResults(initialStepResults);
+      }
+    }
+  }, [currentIndex, currentTC]);
+
+  // 스텝별 결과 변경
+  const handleStepResultChange = (stepIndex, result) => {
+    const newStepResults = [...currentStepResults];
+    newStepResults[stepIndex] = {
+      ...newStepResults[stepIndex],
+      result: result,
+    };
+    setCurrentStepResults(newStepResults);
+  };
+
+  // 스텝별 비고 변경
+  const handleStepNotesChange = (stepIndex, notes) => {
+    const newStepResults = [...currentStepResults];
+    newStepResults[stepIndex] = {
+      ...newStepResults[stepIndex],
+      notes: notes,
+    };
+    setCurrentStepResults(newStepResults);
+  };
+
+  // 전체 TC 결과 자동 계산
+  const calculateTCResult = () => {
+    const stepResultValues = currentStepResults.map(sr => sr.result).filter(r => r);
+
+    if (stepResultValues.length === 0) return null;
+
+    // 하나라도 Fail이면 Fail
+    if (stepResultValues.includes('Fail')) return 'Fail';
+    // 하나라도 Block이면 Block
+    if (stepResultValues.includes('Block')) return 'Block';
+    // 모두 Pass 또는 Skip이면 Pass
+    return 'Pass';
+  };
+
+  const handleNotesChange = (notes) => {
+    setResults({
+      ...results,
+      [currentTC.id]: {
+        ...currentResult,
+        notes: notes,
+      },
+    });
+  };
+
+  const saveCurrentResult = async () => {
+    // 스텝이 있는 경우 모든 스텝 결과가 입력되었는지 확인
+    if (currentTC.steps && currentTC.steps.length > 0) {
+      const allStepsCompleted = currentStepResults.every(sr => sr.result);
+      if (!allStepsCompleted) {
+        alert('모든 테스트 스텝의 결과를 입력해주세요.');
+        return false;
+      }
+    }
+
+    // 전체 TC 결과 자동 계산
+    const calculatedResult = calculateTCResult() || 'Pass';
+
+    try {
+      const response = await fetch(`/api/test-execution-runs/${runId}/results`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          testcase_id: currentTC.id,
+          result: calculatedResult,
+          notes: currentResult.notes || '',
+          step_results: currentStepResults,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('결과 저장 실패');
+      }
+
+      // 저장 성공 시 results 상태 업데이트
+      setResults({
+        ...results,
+        [currentTC.id]: {
+          result: calculatedResult,
+          notes: currentResult.notes || '',
+          stepResults: currentStepResults,
+        },
+      });
+
+      return true;
+    } catch (error) {
+      console.error('결과 저장 실패:', error);
+      alert('결과 저장에 실패했습니다.');
+      return false;
+    }
+  };
+
+  const handleNext = async () => {
+    const saved = await saveCurrentResult();
+    if (!saved) return;
+
+    if (currentIndex < totalCount - 1) {
+      setCurrentIndex(currentIndex + 1);
+    }
+  };
+
+  const handlePrev = async () => {
+    if (currentIndex > 0) {
+      // 현재 스텝 결과가 있으면 임시 저장
+      const calculatedResult = calculateTCResult();
+      if (calculatedResult) {
+        setResults({
+          ...results,
+          [currentTC.id]: {
+            result: calculatedResult,
+            notes: currentResult.notes || '',
+            stepResults: currentStepResults,
+          },
+        });
+      }
+      setCurrentIndex(currentIndex - 1);
+    }
+  };
+
+  // 중단 처리
+  const handleStop = async () => {
+    const confirmed = window.confirm(
+      '테스트를 중단하시겠습니까?\n\n현재까지 입력한 결과는 임시 저장되며, 나중에 이어서 진행할 수 있습니다.'
+    );
+
+    if (!confirmed) return;
+
+    // 현재 TC의 결과가 있으면 저장
+    const calculatedResult = calculateTCResult();
+    if (calculatedResult && currentTC.steps && currentTC.steps.length > 0) {
+      await saveCurrentResult();
+    }
+
+    alert('테스트가 중단되었습니다.\n\n나중에 "테스트 시작" 버튼을 눌러 이어서 진행할 수 있습니다.');
+    onBack();
+  };
+
+  const handleComplete = async () => {
+    // 마지막 TC 저장
+    const saved = await saveCurrentResult();
+    if (!saved) return;
+
+    // 모든 TC가 완료되었는지 확인
+    const allCompleted = Object.keys(results).length === totalCount &&
+                         Object.values(results).every(r => r.result);
+
+    if (!allCompleted) {
+      const missingCount = totalCount - Object.keys(results).filter(id => results[id].result).length;
+      const confirmed = window.confirm(
+        `${missingCount}개의 테스트케이스가 아직 완료되지 않았습니다.\n\n그래도 종료하시겠습니까?`
+      );
+
+      if (!confirmed) return;
+    }
+
+    // Run 완료 처리
+    try {
+      const response = await fetch(`/api/test-execution-runs/${runId}/complete`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          notes: '',
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('완료 처리 실패');
+      }
+
+      const completedRun = await response.json();
+      alert(`테스트 수행이 완료되었습니다!\n\n최종 결과: ${completedRun.status}`);
+      onComplete();
+    } catch (error) {
+      console.error('완료 처리 실패:', error);
+      alert('완료 처리에 실패했습니다.');
+    }
+  };
+
+  if (isCreatingRun) {
+    return (
+      <div className="flex items-center justify-center py-32">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-primary mx-auto mb-4"></div>
+          <p className="text-gray-600">테스트 실행 준비 중...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!currentTC) {
+    return (
+      <div className="text-center py-16">
+        <p className="text-gray-500">테스트케이스가 없습니다.</p>
+        <Button onClick={onBack} variant="secondary" className="mt-4">
+          돌아가기
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-full flex flex-col">
+      {/* Fixed Header */}
+      <div className="flex-shrink-0 mb-4">
+        <button
+          onClick={onBack}
+          className="flex items-center space-x-2 text-gray-600 hover:text-gray-900 mb-3"
+        >
+          <ArrowLeft size={20} />
+          <span>테스트 수행 상세로</span>
+        </button>
+
+        {/* Progress */}
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="font-semibold text-gray-900">{item.name}</h3>
+            <span className="text-sm text-gray-600">
+              {completedCount} / {totalCount} 완료 ({Math.round((completedCount / totalCount) * 100)}%)
+            </span>
+          </div>
+          <div className="w-full bg-gray-200 rounded-full h-2">
+            <div
+              className="bg-primary h-2 rounded-full transition-all duration-300"
+              style={{ width: `${(completedCount / totalCount) * 100}%` }}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* 2단 레이아웃 */}
+      <div className="flex-1 flex gap-6 overflow-hidden">
+        {/* 왼쪽: TC 정보 (40%) */}
+        <div className="w-2/5 bg-white rounded-lg shadow-lg p-6 overflow-y-auto">
+          {/* TC 헤더 */}
+          <div className="mb-4 pb-4 border-b">
+            <div className="flex items-center justify-between mb-2">
+              <h2 className="text-xl font-bold text-gray-900">{currentTC.id}</h2>
+              <span className="text-sm text-gray-500">
+                {currentIndex + 1} / {totalCount}
+              </span>
+            </div>
+            <h3 className="text-lg text-gray-700 font-medium">{currentTC.title}</h3>
+          </div>
+
+          {/* 설명 */}
+          {currentTC.description && (
+            <div className="mb-4">
+              <h4 className="text-xs font-semibold text-gray-500 uppercase mb-2">설명</h4>
+              <p className="text-sm text-gray-700">{currentTC.description}</p>
+            </div>
+          )}
+
+          {/* 사전 조건 */}
+          {currentTC.preconditions && (
+            <div className="mb-4">
+              <h4 className="text-xs font-semibold text-gray-500 uppercase mb-2">사전 조건</h4>
+              <p className="text-sm text-gray-700 bg-yellow-50 p-3 rounded border border-yellow-200">
+                {currentTC.preconditions}
+              </p>
+            </div>
+          )}
+
+          {/* 테스트 스텝 목록 (읽기 전용) */}
+          <div className="mb-4">
+            <h4 className="text-xs font-semibold text-gray-500 uppercase mb-2">테스트 스텝</h4>
+            <div className="space-y-2">
+              {currentTC.steps && currentTC.steps.length > 0 ? (
+                currentTC.steps.map((step, idx) => (
+                  <div key={idx} className="border border-gray-200 rounded p-3 bg-gray-50">
+                    <div className="flex items-start space-x-3">
+                      <div className="flex-shrink-0 w-6 h-6 bg-primary text-white rounded-full flex items-center justify-center text-xs font-bold">
+                        {step.stepNumber || step.step_number || idx + 1}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs text-gray-900 font-medium mb-1">{step.action}</p>
+                        <p className="text-xs text-gray-600">→ {step.expectedResult || step.expected_result}</p>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <p className="text-sm text-gray-500">스텝 없음</p>
+              )}
+            </div>
+          </div>
+
+          {/* 사후 조건 */}
+          {currentTC.postconditions && (
+            <div className="mb-4">
+              <h4 className="text-xs font-semibold text-gray-500 uppercase mb-2">사후 조건</h4>
+              <p className="text-sm text-gray-700 bg-purple-50 p-3 rounded border border-purple-200">
+                {currentTC.postconditions}
+              </p>
+            </div>
+          )}
+        </div>
+
+        {/* 오른쪽: 결과 입력 (60%) */}
+        <div className="w-3/5 bg-white rounded-lg shadow-lg p-6 overflow-y-auto">
+          <h4 className="text-lg font-semibold text-gray-900 mb-4 pb-3 border-b">테스트 실행 결과</h4>
+
+          {/* 스텝별 결과 입력 */}
+          <div className="space-y-4">
+            {currentTC.steps && currentTC.steps.length > 0 ? (
+              currentTC.steps.map((step, idx) => {
+                const stepResult = currentStepResults[idx] || { result: null, notes: '' };
+
+                return (
+                  <div key={idx} className="border-2 border-gray-200 rounded-lg p-4 bg-gray-50">
+                    <div className="flex items-center space-x-3 mb-3">
+                      <div className="flex-shrink-0 w-8 h-8 bg-primary text-white rounded-full flex items-center justify-center font-bold">
+                        {step.stepNumber || step.step_number || idx + 1}
+                      </div>
+                      <h5 className="text-sm font-semibold text-gray-900 flex-1">
+                        스텝 {step.stepNumber || step.step_number || idx + 1} 결과 <span className="text-red-500">*</span>
+                      </h5>
+                    </div>
+
+                    {/* 결과 선택 */}
+                    <div className="grid grid-cols-4 gap-2 mb-3">
+                      {[
+                        { value: 'Pass', label: 'Pass', color: 'bg-green-50 border-green-300 text-green-800' },
+                        { value: 'Fail', label: 'Fail', color: 'bg-red-50 border-red-300 text-red-800' },
+                        { value: 'Block', label: 'Block', color: 'bg-orange-50 border-orange-300 text-orange-800' },
+                        { value: 'Skip', label: 'Skip', color: 'bg-gray-100 border-gray-400 text-gray-800' },
+                      ].map((option) => (
+                        <button
+                          key={option.value}
+                          type="button"
+                          onClick={() => handleStepResultChange(idx, option.value)}
+                          className={`py-2 px-3 border-2 rounded-lg font-semibold text-sm transition ${
+                            stepResult.result === option.value
+                              ? option.color + ' ring-2 ring-primary'
+                              : option.color + ' hover:opacity-80'
+                          }`}
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* 비고 */}
+                    <textarea
+                      value={stepResult.notes}
+                      onChange={(e) => handleStepNotesChange(idx, e.target.value)}
+                      placeholder="비고 (선택)"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm resize-none"
+                      rows="2"
+                    />
+                  </div>
+                );
+              })
+            ) : (
+              <p className="text-gray-500">테스트 스텝이 없습니다.</p>
+            )}
+          </div>
+
+          {/* 자동 계산된 최종 결과 표시 */}
+          {currentTC.steps && currentTC.steps.length > 0 && (
+            <div className="mb-4 pt-4 border-t">
+              <h4 className="text-sm font-semibold text-gray-900 mb-2">최종 결과 (자동 계산)</h4>
+              <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                {(() => {
+                  const result = calculateTCResult();
+                  const completedSteps = currentStepResults.filter(sr => sr.result).length;
+                  const totalSteps = currentStepResults.length;
+
+                  if (!result) {
+                    return (
+                      <p className="text-sm text-gray-600">
+                        결과 입력 중... ({completedSteps}/{totalSteps})
+                      </p>
+                    );
+                  }
+
+                  const resultStyles = {
+                    'Pass': 'text-green-700 font-bold',
+                    'Fail': 'text-red-700 font-bold',
+                    'Block': 'text-orange-700 font-bold',
+                  };
+
+                  return (
+                    <p className={`text-sm ${resultStyles[result]}`}>
+                      최종: <span className="text-xl">{result}</span>
+                      <span className="text-xs text-gray-600 ml-2">
+                        ({completedSteps}/{totalSteps})
+                      </span>
+                    </p>
+                  );
+                })()}
+              </div>
+            </div>
+          )}
+
+          {/* TC 종합 비고 */}
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              종합 비고 (선택)
+            </label>
+            <textarea
+              value={currentResult.notes}
+              onChange={(e) => handleNotesChange(e.target.value)}
+              placeholder="전체 종합 의견..."
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg resize-none text-sm"
+              rows="3"
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Fixed Footer - Navigation */}
+      <div className="flex-shrink-0 mt-4 bg-white rounded-lg shadow-lg p-4">
+        <div className="flex items-center justify-between">
+          <div className="flex space-x-3">
+            <Button
+              onClick={handlePrev}
+              disabled={currentIndex === 0}
+              variant="secondary"
+              className="flex items-center space-x-2"
+            >
+              <ChevronLeft size={18} />
+              <span>이전</span>
+            </Button>
+            <Button
+              onClick={handleStop}
+              variant="secondary"
+              className="flex items-center space-x-2 bg-orange-50 text-orange-600 hover:bg-orange-100 border-orange-200"
+            >
+              <X size={18} />
+              <span>중단</span>
+            </Button>
+          </div>
+
+          <div className="flex space-x-3">
+            {currentIndex < totalCount - 1 ? (
+              <Button
+                onClick={handleNext}
+                variant="primary"
+                className="flex items-center space-x-2"
+              >
+                <span>다음</span>
+                <ChevronRight size={18} />
+              </Button>
+            ) : (
+              <Button
+                onClick={handleComplete}
+                variant="primary"
+                className="flex items-center space-x-2 bg-green-600 hover:bg-green-700"
+              >
+                <CheckCircle size={18} />
+                <span>테스트 완료</span>
+              </Button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

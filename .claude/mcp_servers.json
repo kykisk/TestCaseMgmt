@@ -1,0 +1,38 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:/Workspace/MyWork/TestCase"],
+      "env": {},
+      "disabled": false
+    },
+    "postgres": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres"],
+      "env": {
+        "POSTGRES_CONNECTION_STRING": "postgresql://postgres:Jhy@242135@localhost:5432/testcase_dev"
+      },
+      "disabled": false
+    },
+    "brave-search": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+      "env": {
+        "BRAVE_API_KEY": "BSAAas5lVXzuVGJPGDQedumDGbllV9t"
+      },
+      "disabled": false
+    },
+    "puppeteer": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-puppeteer"],
+      "env": {},
+      "disabled": true
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-playwright"],
+      "env": {},
+      "disabled": true
+    }
+  }
+}
