@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Sparkles, X, Loader2, FileText } from 'lucide-react';
 import Modal from './common/Modal';
 import Input from './common/Input';
@@ -13,8 +13,32 @@ export default function AIGenerateModal({ isOpen, onClose, onGenerate, selectedP
     description: '',
     requirementIds: [],
     category: 'Functional', // 기본값
+    aiModelId: null, // null이면 기본 모델 사용
   });
   const [isGenerating, setIsGenerating] = useState(false);
+  const [aiModels, setAiModels] = useState([]);
+
+  // AI 모델 목록 로드
+  useEffect(() => {
+    if (isOpen && selectedProject) {
+      loadAIModels();
+    }
+  }, [isOpen, selectedProject]);
+
+  const loadAIModels = async () => {
+    try {
+      const url = selectedProject
+        ? `/api/ai-models?project_id=${selectedProject.id}`
+        : '/api/ai-models';
+
+      const response = await fetch(url);
+      const data = await response.json();
+      setAiModels(data || []);
+    } catch (error) {
+      console.error('AI 모델 로드 실패:', error);
+      setAiModels([]);
+    }
+  };
 
   const categoryOptions = [
     { value: 'Functional', label: '기능 테스트 (Functional)', description: '기능의 정상/비정상 동작을 검증' },
@@ -86,6 +110,7 @@ export default function AIGenerateModal({ isOpen, onClose, onGenerate, selectedP
           projectId: selectedProject.id,
           requirementIds: formData.requirementIds,
           category: formData.category,
+          aiModelId: formData.aiModelId, // 선택된 AI 모델
         }),
       });
 
@@ -112,7 +137,7 @@ export default function AIGenerateModal({ isOpen, onClose, onGenerate, selectedP
       onGenerate(result.testcases, formData.requirementIds);
 
       // Reset form
-      setFormData({ title: '', description: '', requirementIds: [], category: 'Functional' });
+      setFormData({ title: '', description: '', requirementIds: [], category: 'Functional', aiModelId: null });
       alert(result.message);
     } catch (error) {
       console.error('AI generation error:', error);
@@ -159,6 +184,36 @@ export default function AIGenerateModal({ isOpen, onClose, onGenerate, selectedP
             <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
               <p className="text-sm text-gray-600">
                 프로젝트: <span className="font-semibold text-primary">{selectedProject.name}</span>
+              </p>
+            </div>
+          )}
+
+          {/* AI Model Selection */}
+          {aiModels.length > 0 && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                사용할 AI 모델
+              </label>
+              <select
+                value={formData.aiModelId || ''}
+                onChange={(e) => handleChange('aiModelId', e.target.value || null)}
+                disabled={isGenerating}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
+              >
+                <option value="">기본 모델 사용</option>
+                {aiModels.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.name}
+                    {model.is_default && ' (기본)'}
+                    {' - '}
+                    {model.model_type}
+                    {' / '}
+                    {model.provider}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-gray-500 mt-1">
+                특정 모델을 선택하거나 비워두면 기본 모델을 사용합니다
               </p>
             </div>
           )}

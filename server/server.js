@@ -17,6 +17,9 @@ const statisticsRouter = require('./routes/statistics');
 const testExecutionSuitesRouter = require('./routes/test-execution-suites');
 const testExecutionItemsRouter = require('./routes/test-execution-items');
 const testExecutionRunsRouter = require('./routes/test-execution-runs');
+const aiModelsRouter = require('./routes/ai-models');
+const projectContextRouter = require('./routes/project-context');
+const functionListRouter = require('./routes/function-list');
 
 // Create Express app
 const app = express();
@@ -40,6 +43,9 @@ app.use('/api/statistics', statisticsRouter);
 app.use('/api/test-execution-suites', testExecutionSuitesRouter);
 app.use('/api/test-execution-items', testExecutionItemsRouter);
 app.use('/api/test-execution-runs', testExecutionRunsRouter);
+app.use('/api/ai-models', aiModelsRouter);
+app.use('/api/project-context', projectContextRouter);
+app.use('/api/function-list', functionListRouter);
 
 // Health check
 app.get('/api/health', (req, res) => {

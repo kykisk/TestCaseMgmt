@@ -355,48 +355,10 @@ router.get('/:id/execution-history', async (req, res) => {
 // POST generate testcases from AI
 router.post('/generate-from-ai', async (req, res) => {
   try {
-    const { title, description, projectId, category = 'Functional', aiModelId } = req.body;
+    const { title, description, projectId, category = 'Functional' } = req.body;
 
     if (!title || !description || !projectId) {
       return res.status(400).json({ error: 'Missing required fields: title, description, projectId' });
-    }
-
-    console.log('[AI] Request aiModelId:', aiModelId);
-
-    // 프로젝트 컨텍스트 가져오기
-    let projectContext = null;
-    try {
-      const contextResult = await pool.query(
-        'SELECT * FROM project_context WHERE project_id = $1',
-        [projectId]
-      );
-
-      if (contextResult.rows.length > 0) {
-        projectContext = contextResult.rows[0];
-
-        // 샘플 TC 가져오기
-        if (projectContext.sample_testcase_ids && projectContext.sample_testcase_ids.length > 0) {
-          const sampleTCResult = await pool.query(
-            'SELECT * FROM testcases WHERE id = ANY($1::varchar[])',
-            [projectContext.sample_testcase_ids]
-          );
-
-          // 샘플 TC의 스텝도 가져오기
-          projectContext.sample_testcases = await Promise.all(
-            sampleTCResult.rows.map(async (tc) => {
-              const stepsResult = await pool.query(
-                'SELECT * FROM test_steps WHERE testcase_id = $1 ORDER BY step_number',
-                [tc.id]
-              );
-              return { ...tc, steps: stepsResult.rows };
-            })
-          );
-        }
-      }
-
-      console.log('[AI] Project context loaded:', projectContext ? 'Yes' : 'No');
-    } catch (contextError) {
-      console.error('[AI] Failed to load project context:', contextError.message);
     }
 
     // 카테고리별 테스트 가이드
@@ -409,45 +371,8 @@ router.post('/generate-from-ai', async (req, res) => {
       'Security': '인증/인가, 권한 검증, 데이터 보안, SQL 인젝션 방어 등 보안을 검증하는 테스트',
     };
 
-    // Create AI prompt (프로젝트 컨텍스트 포함)
-    let contextSection = '';
-
-    if (projectContext) {
-      contextSection = `
-
-[프로젝트 컨텍스트]
-이 프로젝트에 대한 중요한 배경 지식입니다. 테스트케이스 생성 시 반드시 참고하세요.
-
-${projectContext.overview ? `## 프로젝트 개요
-${projectContext.overview}
-` : ''}
-${projectContext.tech_stack ? `## 기술 스택
-${projectContext.tech_stack}
-` : ''}
-${projectContext.glossary ? `## 용어집
-${projectContext.glossary}
-` : ''}
-${projectContext.business_rules ? `## 비즈니스 규칙
-${projectContext.business_rules}
-` : ''}
-${projectContext.domain_knowledge ? `## 도메인 지식
-${projectContext.domain_knowledge}
-` : ''}
-${projectContext.sample_testcases && projectContext.sample_testcases.length > 0 ? `
-## 샘플 테스트케이스 (참고용 - 이런 스타일로 작성하세요)
-${projectContext.sample_testcases.map(tc => `
-### ${tc.id}: ${tc.title}
-${tc.description || ''}
-**스텝:**
-${tc.steps?.map(s => `${s.step_number}. ${s.action} → ${s.expected_result}`).join('\n') || '없음'}
-`).join('\n')}
-` : ''}
-위 정보를 바탕으로 프로젝트에 맞는 구체적이고 실용적인 테스트케이스를 작성하세요.
-`;
-    }
-
+    // Create AI prompt
     const prompt = `당신은 테스트케이스 작성 전문가입니다. 다음 기능에 대한 "${category}" 테스트케이스를 JSON 형식으로 생성해주세요.
-${contextSection}
 
 기능 제목: ${title}
 테스트 카테고리: ${category}
@@ -459,7 +384,6 @@ ${description}
 위 기능 설명은 자유 형식이거나 구조화된 템플릿 형식일 수 있습니다.
 - 구조화된 템플릿인 경우: ## 섹션으로 구분된 입력/출력/규칙/예외상황 등을 분석하세요
 - 자유 형식인 경우: 전체 내용을 분석하여 테스트 시나리오를 도출하세요
-- 프로젝트 컨텍스트에 명시된 용어, 규칙, 도메인 지식을 적극 활용하세요
 
 다음 JSON 형식으로 여러 개의 테스트케이스를 생성해주세요:
 {
@@ -524,20 +448,24 @@ ${category === 'Security' ? `
 - 각 테스트케이스는 간결하게 작성하세요
 - 응답은 반드시 완전한 JSON 형식이어야 합니다`;
 
+    // AI 유틸리티 사용 (설정된 모델 자동 사용)
     let aiResponse;
-
-    // 먼저 설정된 AI 모델 사용 시도
     try {
-      console.log('[AI] Trying configured AI model...');
-      aiResponse = await generateTestCases(prompt, projectId, aiModelId);
-      console.log('[AI] Successfully used configured model');
-    } catch (configError) {
-      console.log('[AI] No configured model, using legacy AWS Bedrock from env');
+      aiResponse = await generateTestCases(prompt, projectId);
+    } catch (aiError) {
+      console.error('[AI] Generation failed, falling back to legacy method:', aiError.message);
 
-      // 폴백: 환경변수의 AWS Bedrock 사용
-      // Check if using Bedrock API Key format (base64 encoded AWS credentials)
-      let awsAccessKeyId = process.env.AWS_ACCESS_KEY_ID;
-      let awsSecretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
+      // 폴백: 기존 방식 (환경변수 사용)
+      let fallbackResponse = await callLegacyAI(prompt);
+      aiResponse = fallbackResponse;
+    }
+
+    // 기존 AWS Bedrock 폴백 함수
+    async function callLegacyAI(prompt) {
+
+    // Check if using Bedrock API Key format (base64 encoded AWS credentials)
+    let awsAccessKeyId = process.env.AWS_ACCESS_KEY_ID;
+    let awsSecretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
 
     if (process.env.BEDROCK_API_KEY && process.env.BEDROCK_API_KEY !== 'your-bedrock-api-key') {
       // Decode Bedrock API Key (format: base64(access_key:secret_key))
@@ -612,7 +540,6 @@ ${category === 'Security' ? `
         details: 'Please set BEDROCK_API_KEY or (AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY) in .env file'
       });
     }
-    } // 폴백 catch 블록 끝
 
     console.log('AI Response length:', aiResponse.length);
     console.log('AI Response preview:', aiResponse.substring(0, 200));

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Home, FileText, ListChecks, BarChart3, Plus, Trash2, Upload, Sparkles, Play } from 'lucide-react';
+import { Home, FileText, ListChecks, BarChart3, Plus, Trash2, Upload, Sparkles, Play, Settings as SettingsIcon, FolderCog, Code } from 'lucide-react';
 import ProjectModal from './components/ProjectModal';
 import TestCaseModal from './components/TestCaseModal';
 import ExcelImportModal from './components/ExcelImportModal';
@@ -11,6 +11,9 @@ import TestExecutionList from './components/TestExecutionList';
 import TestExecutionDetail from './components/TestExecutionDetail';
 import TestExecutionRun from './components/TestExecutionRun';
 import AIGenerateModal from './components/AIGenerateModal';
+import AIModelSettings from './components/AIModelSettings';
+import ProjectManagement from './components/ProjectManagement';
+import FunctionList from './components/FunctionList';
 import Button from './components/common/Button';
 import {
   getProjects,
@@ -575,6 +578,17 @@ function App() {
                 <span>대시보드</span>
               </button>
               <button
+                onClick={() => setCurrentView('project-management')}
+                className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition ${
+                  currentView === 'project-management'
+                    ? 'bg-primary text-white'
+                    : 'hover:bg-gray-100'
+                }`}
+              >
+                <FolderCog size={20} />
+                <span>프로젝트 관리</span>
+              </button>
+              <button
                 onClick={() => setCurrentView('requirements')}
                 className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition ${
                   currentView === 'requirements'
@@ -584,6 +598,17 @@ function App() {
               >
                 <FileText size={20} />
                 <span>요구사항</span>
+              </button>
+              <button
+                onClick={() => setCurrentView('function-list')}
+                className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition ${
+                  currentView === 'function-list'
+                    ? 'bg-primary text-white'
+                    : 'hover:bg-gray-100'
+                }`}
+              >
+                <Code size={20} />
+                <span>Function List</span>
               </button>
               <button
                 onClick={() => setCurrentView('testcases')}
@@ -620,6 +645,17 @@ function App() {
               >
                 <BarChart3 size={20} />
                 <span>통계 및 리포트</span>
+              </button>
+              <button
+                onClick={() => setCurrentView('settings')}
+                className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition ${
+                  currentView === 'settings'
+                    ? 'bg-primary text-white'
+                    : 'hover:bg-gray-100'
+                }`}
+              >
+                <SettingsIcon size={20} />
+                <span>설정</span>
               </button>
             </nav>
           </aside>
@@ -706,6 +742,13 @@ function App() {
               />
             )}
 
+            {currentView === 'function-list' && (
+              <FunctionList
+                selectedProject={selectedProject}
+                requirements={requirements}
+              />
+            )}
+
             {currentView === 'testcases' && (
               <TestCaseList
                 testCases={testCases}
@@ -742,6 +785,34 @@ function App() {
                 <h2 className="text-2xl font-bold mb-6">통계 및 리포트</h2>
                 <p className="text-gray-500">통계 및 리포트 기능이 곧 추가됩니다.</p>
               </div>
+            )}
+
+            {currentView === 'project-management' && (
+              <ProjectManagement
+                projects={projects}
+                selectedProject={selectedProject}
+                onSelectProject={(project) => setSelectedProject(project)}
+                onCreateProject={() => setIsProjectModalOpen(true)}
+                onDeleteProject={async (project) => {
+                  try {
+                    await deleteProject(project.id);
+                    setProjects(projects.filter(p => p.id !== project.id));
+                    if (selectedProject?.id === project.id) {
+                      setSelectedProject(null);
+                    }
+                    alert(`프로젝트 "${project.name}"가 삭제되었습니다.`);
+                    await loadProjects();
+                  } catch (error) {
+                    console.error('프로젝트 삭제 실패:', error);
+                    alert('프로젝트 삭제에 실패했습니다.');
+                  }
+                }}
+                testCases={testCases}
+              />
+            )}
+
+            {currentView === 'settings' && (
+              <AIModelSettings selectedProject={selectedProject} />
             )}
 
             {currentView === 'test-execution' && (
